@@ -1,0 +1,27 @@
+name = "co-cane-cabana-spending-tracker"
+main = "worker/src/index.ts"
+compatibility_date = "2025-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spending-tracker-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "drizzle"
+
+[vars]
+APP_ENV = "local"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[env.production.vars]
+APP_ENV = "production"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "spending-tracker-db"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
+migrations_dir = "drizzle"
