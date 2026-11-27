@@ -6,9 +6,9 @@ import {
   getCategories,
   getItems,
   getPurchase,
+  getPurchaseAuditEvents,
   getPurchases,
   updatePurchase,
-  getHealth,
   type Category,
   type Item,
   type PurchaseDetail,
@@ -18,6 +18,8 @@ import {
   type AnalyticsData,
 } from './services/api'
 import { CategoryChart, ItemRankingChart, TrendChart } from './components/Charts'
+import { AuthGate } from './components/AuthGate'
+import { createRequestId } from './services/diagnostics'
 
 interface LineDraft {
   name: string
@@ -139,6 +141,7 @@ function PurchaseForm({
     try {
       if (initial) {
         await updatePurchase(initial.id, {
+          version: initial.version,
           purchaseDate,
           ...(supplierName.trim() ? { supplierName: supplierName.trim() } : {}),
           ...(notes.trim() ? { notes: notes.trim() } : {}),
@@ -570,60 +573,92 @@ function Dashboard() {
 }
 
 function App() {
-  const [ownerKey, setOwnerKey] = useState(
-    () => sessionStorage.getItem('ownerAccessToken') ?? '',
+  return <AuthGate><AuthenticatedApp /></AuthGate>
+}
+
+function AuditHistory() {
+  const [events, setEvents] = useState<Awaited<ReturnType<typeof getPurchaseAuditEvents>>['events']>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    getPurchaseAuditEvents()
+      .then(({ events: entries, hasMore: more }) => {
+        setEvents(entries)
+        setHasMore(more)
+      })
+      .catch((caught: unknown) => setError(
+        caught instanceof Error ? caught.message : 'Unable to load audit history',
+      ))
+      .finally(() => setLoading(false))
+  }, [])
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+      <h2 className="text-lg font-bold">Purchase audit history</h2>
+      <p className="mt-1 text-sm text-slate-500">
+        Purchase changes and the member who made them where known. Deleted purchases remain listed.
+      </p>
+      {loading && <p className="mt-5 text-sm text-slate-500">Loading audit history…</p>}
+      {error && <p role="alert" className="mt-5 text-sm text-red-700">{error}</p>}
+      {!loading && !error && events.length === 0 && (
+        <p className="mt-5 rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+          No purchase changes recorded yet
+        </p>
+      )}
+      {!loading && events.length > 0 && (
+        <>
+          <ol className="mt-5 divide-y divide-slate-100">
+            {events.map((event) => (
+              <li key={event.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
+                <span>
+                  <strong className="capitalize">
+                    {event.action === 'legacy_baseline'
+                      ? 'Existing purchase (history baseline)'
+                      : event.action}
+                  </strong>
+                  {' '}purchase #{event.purchaseId}
+                  <span className="text-slate-500"> · version {event.version}</span>
+                </span>
+                <span className="text-slate-600">
+                  {event.actorDisplayName} · {new Date(event.occurredAt).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {hasMore && (
+            <button
+              type="button"
+              disabled={loadingMore}
+              onClick={() => {
+                const beforeId = events[events.length - 1]?.id
+                if (!beforeId) return
+                setLoadingMore(true)
+                getPurchaseAuditEvents(undefined, beforeId)
+                  .then(({ events: older, hasMore: more }) => {
+                    setEvents((current) => [...current, ...older])
+                    setHasMore(more)
+                  })
+                  .catch((caught: unknown) => setError(
+                    caught instanceof Error ? caught.message : 'Unable to load older audit events',
+                  ))
+                  .finally(() => setLoadingMore(false))
+              }}
+              className="mt-4 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium disabled:opacity-60"
+            >
+              {loadingMore ? 'Loading…' : 'Load older events'}
+            </button>
+          )}
+        </>
+      )}
+    </section>
   )
-  const [keyDraft, setKeyDraft] = useState('')
-  const [loginError, setLoginError] = useState('')
-
-  async function unlock() {
-    setLoginError('')
-    sessionStorage.setItem('ownerAccessToken', keyDraft)
-    try {
-      await getHealth()
-      setOwnerKey(keyDraft)
-    } catch {
-      sessionStorage.removeItem('ownerAccessToken')
-      setLoginError('The access key was not accepted.')
-    }
-  }
-
-  if (!ownerKey) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            void unlock()
-          }}
-          className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
-        >
-          <h1 className="text-xl font-bold">Owner access</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            Enter the access key configured for this deployment.
-          </p>
-          <input
-            type="password"
-            value={keyDraft}
-            onChange={(event) => setKeyDraft(event.target.value)}
-            autoComplete="current-password"
-            className="mt-4 w-full rounded-lg border border-slate-300 px-3 py-2"
-            required
-          />
-          {loginError && <p className="mt-2 text-sm text-red-600">{loginError}</p>}
-          <button type="submit" className="mt-4 w-full rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white">
-            Unlock
-          </button>
-        </form>
-      </main>
-    )
-  }
-
-  return <AuthenticatedApp />
 }
 
 function AuthenticatedApp() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'entry' | 'history'>('dashboard')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'entry' | 'history' | 'audit'>('dashboard')
   const [categories, setCategories] = useState<Category[]>([])
   const [items, setItems] = useState<Item[]>([])
   const [purchases, setPurchases] = useState<PurchaseSummary[]>([])
@@ -683,7 +718,7 @@ function AuthenticatedApp() {
   async function removePurchase(purchase: PurchaseSummary) {
     if (!window.confirm(`Delete the purchase from ${purchase.purchaseDate}?`)) return
     try {
-      await deletePurchase(purchase.id)
+      await deletePurchase(purchase.id, purchase.version)
       setExpanded((current) => {
         const next = { ...current }
         delete next[purchase.id]
@@ -701,9 +736,9 @@ function AuthenticatedApp() {
   }
 
   async function downloadCsv(kind: 'purchases' | 'purchase-items' | 'categories' | 'items') {
-    const token = sessionStorage.getItem('ownerAccessToken')
     const response = await fetch(`/api/exports/${kind}.csv`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'same-origin',
+      headers: { 'X-Request-ID': createRequestId() },
     })
     if (!response.ok) throw new Error('Unable to export CSV')
     const blob = await response.blob()
@@ -727,7 +762,7 @@ function AuthenticatedApp() {
       </header>
       <nav className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center px-4 sm:px-6">
-          {(['dashboard', 'entry', 'history'] as const).map((tab) => (
+          {(['dashboard', 'entry', 'history', 'audit'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -735,7 +770,10 @@ function AuthenticatedApp() {
                 activeTab === tab ? 'border-emerald-700 text-emerald-700' : 'border-transparent text-slate-500'
               }`}
             >
-              {tab === 'dashboard' ? 'Dashboard' : tab === 'entry' ? 'New purchase' : 'Purchase history'}
+              {tab === 'dashboard' ? 'Dashboard'
+                : tab === 'entry' ? 'New purchase'
+                : tab === 'history' ? 'Purchase history'
+                : 'Audit history'}
             </button>
           ))}
           <select
@@ -763,6 +801,7 @@ function AuthenticatedApp() {
         {loadError && <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{loadError}</p>}
 
         {activeTab === 'dashboard' && <Dashboard />}
+        {activeTab === 'audit' && <AuditHistory />}
 
         {activeTab === 'entry' && (
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">

@@ -1,0 +1,87 @@
+name: CI and deployment
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, lint, test, build, and migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: TypeScript typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Validate migrations against local D1
+        run: |
+          npm run db:migrate:local
+          npm run db:validate
+          npm run test:migrations
+      - name: Unit tests
+        run: |
+          npm run test:analytics
+          npm run test:insights
+          npm run test:observability
+      - name: API and authentication tests
+        run: |
+          npm run test:api
+          npm run test:auth
+      - name: Database tests
+        run: npm run test:db
+      - name: Production build
+        run: npm run build
+
+  deploy-staging:
+    name: Deploy staging
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Apply staging migrations
+        run: npm run db:migrate:staging
+      - name: Build and deploy staging
+        run: npm run deploy:staging
+
+  deploy-production:
+    name: Deploy production
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build and deploy production
+        run: npm run deploy:production

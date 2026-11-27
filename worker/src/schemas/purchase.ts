@@ -21,3 +21,11 @@ export const createPurchaseSchema = z.object({
   notes: z.string().trim().max(1000).optional(),
   items: z.array(purchaseItemInputSchema).min(1, 'A purchase must contain at least one item'),
 })
+
+export const updatePurchaseSchema = createPurchaseSchema.extend({
+  version: z.coerce.number().int().positive(),
+})
+
+export const deletePurchaseSchema = z.object({
+  version: z.coerce.number().int().positive(),
+})

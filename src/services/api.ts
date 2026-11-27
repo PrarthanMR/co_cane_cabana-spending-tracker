@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createRequestId } from './diagnostics'
 
 const healthResponseSchema = z.object({
   status: z.literal('ok'),
@@ -8,12 +9,7 @@ const healthResponseSchema = z.object({
 export type HealthResponse = z.infer<typeof healthResponseSchema>
 
 export async function getHealth(): Promise<HealthResponse> {
-  const ownerKey = sessionStorage.getItem('ownerAccessToken')
-  const headers = new Headers()
-  if (ownerKey) headers.set('Authorization', `Bearer ${ownerKey}`)
-  const response = await fetch('/api/health', { headers })
-  if (!response.ok) throw new Error('Unable to reach the API')
-  return healthResponseSchema.parse(await response.json())
+  return request<HealthResponse>('/api/health')
 }
 
 export interface Category {
@@ -60,9 +56,12 @@ export interface PurchaseSummary {
   supplierName: string | null
   notes: string | null
   totalAmountPaise: number
+  version: number
 }
 
 export interface PurchaseDetail extends PurchaseSummary {
+  createdBy: string | null
+  updatedBy: string | null
   items: Array<{
     id: number
     itemId: number
@@ -76,15 +75,132 @@ export interface PurchaseDetail extends PurchaseSummary {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const ownerKey = sessionStorage.getItem('ownerAccessToken')
   const headers = new Headers(init?.headers)
-  if (ownerKey) headers.set('Authorization', `Bearer ${ownerKey}`)
-  const response = await fetch(url, { ...init, headers })
+  const requestId = createRequestId()
+  headers.set('X-Request-ID', requestId)
+  let response: Response
+  try {
+    response = await fetch(url, { ...init, headers, credentials: 'same-origin' })
+  } catch {
+    throw new ApiRequestError('Unable to reach the API', requestId, 0)
+  }
+  const responseRequestId = response.headers.get('X-Request-ID') ?? requestId
   const body = await response.json().catch(() => ({ error: 'Invalid server response' }))
   if (!response.ok) {
-    throw new Error(typeof body.error === 'string' ? body.error : 'Request failed')
+    throw new ApiRequestError(
+      typeof body.error === 'string' ? body.error : 'Request failed',
+      responseRequestId,
+      response.status,
+    )
   }
   return body as T
+}
+
+export class ApiRequestError extends Error {
+  readonly requestId: string
+  readonly status: number
+
+  constructor(
+    message: string,
+    requestId: string,
+    status: number,
+  ) {
+    super(message)
+    this.requestId = requestId
+    this.status = status
+  }
+}
+
+export interface AuthSession {
+  user: { id: number; username: string; displayName: string }
+  activeBusinessId: number | null
+  memberships: Array<{
+    businessId: number
+    businessName: string
+    currencyCode: string
+    role: 'owner' | 'member'
+  }>
+}
+
+export async function getAuthStatus() {
+  return request<{ registrationComplete: boolean }>('/api/auth/status')
+}
+
+export async function getAuthSession() {
+  return request<AuthSession>('/api/auth/session')
+}
+
+export async function registerOwner(input: {
+  bootstrapToken: string
+  businessName: string
+  username: string
+  displayName: string
+  pin: string
+}) {
+  return request<{ userId: number; businessId: number }>('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function login(input: { username: string; pin: string }) {
+  return request<{ userId: number; businessId: number | null }>('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function joinBusiness(input: {
+  invitationCode: string
+  username: string
+  displayName: string
+  pin: string
+}) {
+  return request<{ userId: number; businessId: number }>('/api/auth/join', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function logout() {
+  return request<{ loggedOut: boolean }>('/api/auth/logout', { method: 'POST' })
+}
+
+export async function selectBusiness(businessId: number) {
+  return request<{ businessId: number; role: 'owner' | 'member' }>('/api/auth/select-business', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ businessId }),
+  })
+}
+
+export async function createInvitation(expiresInHours = 24) {
+  return request<{ code: string; expiresAt: number }>('/api/auth/invitations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresInHours }),
+  })
+}
+
+export async function getMembers() {
+  return request<{ members: Array<{
+    userId: number
+    username: string
+    displayName: string
+    role: 'owner' | 'member'
+    joinedAt: number
+  }> }>('/api/auth/members')
+}
+
+export async function deactivateMember(userId: number) {
+  return request<{ deactivated: boolean }>(`/api/auth/members/${userId}/deactivate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
 }
 
 export async function getCategories(): Promise<Category[]> {
@@ -140,7 +256,27 @@ export async function getPurchase(id: number) {
   return request<{ purchase: PurchaseDetail }>(`/api/purchases/${id}`)
 }
 
-export async function updatePurchase(id: number, input: PurchaseInput) {
+export interface PurchaseAuditEvent {
+  id: number
+  purchaseId: number
+  version: number
+  action: 'created' | 'updated' | 'deleted' | 'legacy_baseline'
+  actorUserId: number | null
+  actorDisplayName: string
+  occurredAt: number
+}
+
+export async function getPurchaseAuditEvents(purchaseId?: number, beforeId?: number) {
+  const params = new URLSearchParams()
+  if (purchaseId) params.set('purchaseId', String(purchaseId))
+  if (beforeId) params.set('beforeId', String(beforeId))
+  const query = params.toString()
+  return request<{ events: PurchaseAuditEvent[]; hasMore: boolean }>(
+    `/api/audit/purchases${query ? `?${query}` : ''}`,
+  )
+}
+
+export async function updatePurchase(id: number, input: PurchaseInput & { version: number }) {
   return request<{ purchase: PurchaseDetail }>(`/api/purchases/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -148,9 +284,11 @@ export async function updatePurchase(id: number, input: PurchaseInput) {
   })
 }
 
-export async function deletePurchase(id: number) {
+export async function deletePurchase(id: number, version: number) {
   return request<{ deleted: boolean }>(`/api/purchases/${id}`, {
     method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
   })
 }
 

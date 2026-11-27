@@ -1,36 +1,13 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import test from 'node:test'
-
-const ownerHeaders = { Authorization: 'Bearer local-development-owner-token' }
-
-async function waitForApi(url) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      const response = await fetch(url, { headers: ownerHeaders })
-      if (response.ok) return
-    } catch {}
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  throw new Error('Local Worker did not start')
-}
+import { startAuthenticatedWorker } from './helpers/auth-worker.mjs'
 
 test('analytics uses inclusive date boundaries and backend totals', async () => {
-  const worker = spawn(
-    process.execPath,
-    [
-      'node_modules/wrangler/bin/wrangler.js',
-      'dev',
-      '--local',
-      '--port',
-      '8791',
-    ],
-    { stdio: 'ignore', cwd: process.cwd() },
-  )
+  const app = await startAuthenticatedWorker(8791)
+  const { baseUrl, headers } = app
 
   try {
-    await waitForApi('http://127.0.0.1:8791/api/health')
-    const categories = await (await fetch('http://127.0.0.1:8791/api/categories', { headers: ownerHeaders })).json()
+    const categories = await (await fetch(`${baseUrl}/api/categories`, { headers })).json()
     const fruits = categories.categories.find((category) => category.name === 'Fruits')
     assert.ok(fruits)
 
@@ -39,9 +16,9 @@ test('analytics uses inclusive date boundaries and backend totals', async () => 
       ['2099-01-01', 500, 1, 'kg'],
       ['2099-01-02', 1000, 2, 'kg'],
     ]) {
-      const response = await fetch('http://127.0.0.1:8791/api/purchases', {
+      const response = await fetch(`${baseUrl}/api/purchases`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...ownerHeaders },
+        headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify({
           purchaseDate: date,
           items: [{
@@ -62,8 +39,8 @@ test('analytics uses inclusive date boundaries and backend totals', async () => 
     }
 
     const customResponse = await fetch(
-      'http://127.0.0.1:8791/api/analytics?preset=custom&from=2099-01-02&to=2099-01-02',
-      { headers: ownerHeaders },
+      `${baseUrl}/api/analytics?preset=custom&from=2099-01-02&to=2099-01-02`,
+      { headers },
     )
     assert.equal(customResponse.status, 200)
     const custom = await customResponse.json()
@@ -79,8 +56,8 @@ test('analytics uses inclusive date boundaries and backend totals', async () => 
     const itemId = custom.items.find((item) => item.name.includes('2099-01-02'))?.itemId
     assert.ok(itemId)
     const itemResponse = await fetch(
-      `http://127.0.0.1:8791/api/analytics?preset=custom&from=2099-01-02&to=2099-01-02&itemId=${itemId}`,
-      { headers: ownerHeaders },
+      `${baseUrl}/api/analytics?preset=custom&from=2099-01-02&to=2099-01-02&itemId=${itemId}`,
+      { headers },
     )
     const itemData = await itemResponse.json()
     assert.equal(itemData.itemHistory.history.length, 1)
@@ -91,11 +68,11 @@ test('analytics uses inclusive date boundaries and backend totals', async () => 
 
     for (const purchaseId of purchaseIds) {
       await fetch(
-        `http://127.0.0.1:8791/api/purchases/${purchaseId}`,
-        { method: 'DELETE', headers: ownerHeaders },
+        `${baseUrl}/api/purchases/${purchaseId}`,
+        { method: 'DELETE', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ version: 1 }) },
       )
     }
   } finally {
-    worker.kill()
+    await app.cleanup()
   }
 })

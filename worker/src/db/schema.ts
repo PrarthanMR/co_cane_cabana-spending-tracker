@@ -11,9 +11,40 @@ export const appMetadata = sqliteTable('app_metadata', {
 export const businesses = sqliteTable('businesses', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),
+  currencyCode: text('currency_code').notNull().default('INR'),
+  timeZone: text('time_zone').notNull().default('Asia/Kolkata'),
+  brandingJson: text('branding_json'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
 })
+
+export const users = sqliteTable('users', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  username: text('username').notNull().unique(),
+  displayName: text('display_name').notNull(),
+  pinHash: text('pin_hash').notNull(),
+  pinSalt: text('pin_salt').notNull(),
+  pinIterations: integer('pin_iterations').notNull(),
+  isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+})
+
+export const businessMembers = sqliteTable('business_members', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  businessId: integer('business_id').notNull().references(() => businesses.id),
+  userId: integer('user_id').notNull().references(() => users.id),
+  role: text('role', { enum: ['owner', 'member'] }).notNull(),
+  isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
+  invitedByUserId: integer('invited_by_user_id').references(() => users.id),
+  joinedAt: integer('joined_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+  deactivatedAt: integer('deactivated_at', { mode: 'timestamp_ms' }),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+}, (table) => [
+  uniqueIndex('business_members_business_user_unique').on(table.businessId, table.userId),
+  index('business_members_user_active_idx').on(table.userId, table.isActive),
+  index('business_members_business_role_active_idx').on(table.businessId, table.role, table.isActive),
+])
 
 export const categories = sqliteTable('categories', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -54,10 +85,62 @@ export const purchases = sqliteTable('purchases', {
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
   createdBy: text('created_by'),
   updatedBy: text('updated_by'),
+  createdByUserId: integer('created_by_user_id').references(() => users.id),
+  updatedByUserId: integer('updated_by_user_id').references(() => users.id),
+  version: integer('version').notNull().default(1),
+  updateToken: text('update_token'),
 }, (table) => [
   index('purchases_business_date_idx').on(table.businessId, table.purchaseDate),
   index('purchases_business_created_idx').on(table.businessId, table.createdAt),
 ])
+
+export const sessions = sqliteTable('sessions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  tokenHash: text('token_hash').notNull().unique(),
+  userId: integer('user_id').notNull().references(() => users.id),
+  businessId: integer('business_id').references(() => businesses.id),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+  revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+}, (table) => [
+  index('sessions_user_active_idx').on(table.userId, table.revokedAt, table.expiresAt),
+  index('sessions_business_active_idx').on(table.businessId, table.revokedAt),
+])
+
+export const invitationCodes = sqliteTable('invitation_codes', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  businessId: integer('business_id').notNull().references(() => businesses.id),
+  codeHash: text('code_hash').notNull().unique(),
+  createdByUserId: integer('created_by_user_id').notNull().references(() => users.id),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+  expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  redeemedAt: integer('redeemed_at', { mode: 'timestamp_ms' }),
+  redeemedByUserId: integer('redeemed_by_user_id').references(() => users.id),
+}, (table) => [
+  index('invitation_codes_business_expiry_idx').on(table.businessId, table.expiresAt),
+])
+
+export const purchaseAuditEvents = sqliteTable('purchase_audit_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  businessId: integer('business_id').notNull().references(() => businesses.id),
+  purchaseId: integer('purchase_id').notNull(),
+  purchaseVersion: integer('purchase_version').notNull(),
+  action: text('action', { enum: ['created', 'updated', 'deleted', 'legacy_baseline'] }).notNull(),
+  actorUserId: integer('actor_user_id').references(() => users.id),
+  occurredAt: integer('occurred_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+}, (table) => [
+  index('purchase_audit_business_purchase_idx').on(table.businessId, table.purchaseId, table.occurredAt),
+  index('purchase_audit_actor_idx').on(table.actorUserId, table.occurredAt),
+])
+
+export const authRateLimits = sqliteTable('auth_rate_limits', {
+  keyHash: text('key_hash').primaryKey(),
+  failureCount: integer('failure_count').notNull().default(0),
+  windowStartedAt: integer('window_started_at', { mode: 'timestamp_ms' }).notNull(),
+  lockedUntil: integer('locked_until', { mode: 'timestamp_ms' }),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull().default(sql`(strftime('%s','now') * 1000)`),
+})
 
 export const purchaseItems = sqliteTable('purchase_items', {
   id: integer('id').primaryKey({ autoIncrement: true }),

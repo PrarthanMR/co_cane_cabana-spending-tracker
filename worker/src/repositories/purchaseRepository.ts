@@ -33,6 +33,7 @@ export interface PurchaseDetail {
   updatedAt: number
   createdBy: string | null
   updatedBy: string | null
+  version: number
 }
 
 export class PurchaseRepository {
@@ -84,7 +85,7 @@ export class PurchaseRepository {
     return rows
   }
 
-  async createPurchase(input: CreatePurchaseInput, businessId: number, actor = 'owner') {
+  async createPurchase(input: CreatePurchaseInput, businessId: number, actorUserId: number) {
     if (input.items.length === 0) {
       throw new Error('A purchase must contain at least one item')
     }
@@ -126,8 +127,9 @@ export class PurchaseRepository {
     statements.push(
       this.db.prepare(
         `INSERT INTO purchases
-         (business_id, purchase_date, supplier_name, notes, total_amount_paise, created_at, updated_at, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (business_id, purchase_date, supplier_name, notes, total_amount_paise,
+          created_at, updated_at, created_by, updated_by, created_by_user_id, updated_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         businessId,
         input.purchaseDate,
@@ -136,8 +138,10 @@ export class PurchaseRepository {
         totalAmountPaise,
         now,
         now,
-        actor,
-        actor,
+        String(actorUserId),
+        String(actorUserId),
+        actorUserId,
+        actorUserId,
       ),
     )
 
@@ -239,7 +243,7 @@ export class PurchaseRepository {
     const headerResult = await this.db
       .prepare(
         `SELECT id, purchase_date AS purchaseDate, supplier_name AS supplierName,
-                notes, total_amount_paise AS totalAmountPaise
+                notes, total_amount_paise AS totalAmountPaise, version
          FROM purchases p
          WHERE ${conditions.join(' AND ')}
          ORDER BY purchase_date DESC, id DESC`,
@@ -254,6 +258,7 @@ export class PurchaseRepository {
       supplierName: row.supplierName ? String(row.supplierName) : null,
       notes: row.notes ? String(row.notes) : null,
       totalAmountPaise: Number(row.totalAmountPaise),
+      version: Number(row.version),
     }))
   }
 
@@ -264,7 +269,7 @@ export class PurchaseRepository {
                 supplier_name AS supplierName, notes,
                 total_amount_paise AS totalAmountPaise,
                 created_at AS createdAt, updated_at AS updatedAt,
-                created_by AS createdBy, updated_by AS updatedBy
+                created_by AS createdBy, updated_by AS updatedBy, version
          FROM purchases
          WHERE id = ? AND business_id = ?`,
       )
@@ -280,6 +285,7 @@ export class PurchaseRepository {
         updatedAt: number
         createdBy: string | null
         updatedBy: string | null
+        version: number
       }>()
     if (!header) return null
 
@@ -311,7 +317,12 @@ export class PurchaseRepository {
     }
   }
 
-  async updatePurchase(purchaseId: number, input: CreatePurchaseInput, businessId: number, actor = 'owner') {
+  async updatePurchase(
+    purchaseId: number,
+    input: CreatePurchaseInput & { version: number },
+    businessId: number,
+    actorUserId: number,
+  ) {
     if (input.items.length === 0) {
       throw new Error('A purchase must contain at least one item')
     }
@@ -321,25 +332,42 @@ export class PurchaseRepository {
     const itemRows = await this.resolveItems(input, businessId)
     const totalAmountPaise = input.items.reduce((total, item) => total + item.amountPaise, 0)
     const now = Date.now()
+    const updateToken = crypto.randomUUID()
     const statements: D1PreparedStatement[] = [
       this.db.prepare(
         `UPDATE purchases
          SET purchase_date = ?, supplier_name = ?, notes = ?,
-             total_amount_paise = ?, updated_at = ?, updated_by = ?
-         WHERE id = ? AND business_id = ?`,
+             total_amount_paise = ?, updated_at = ?, updated_by = ?,
+             updated_by_user_id = ?, version = version + 1, update_token = ?
+         WHERE id = ? AND business_id = ? AND version = ?`,
       ).bind(
         input.purchaseDate,
         input.supplierName ?? null,
         input.notes ?? null,
         totalAmountPaise,
         now,
-        actor,
+        String(actorUserId),
+        actorUserId,
+        updateToken,
         purchaseId,
         businessId,
+        input.version,
       ),
       this.db.prepare(
-        'DELETE FROM purchase_items WHERE purchase_id = ? AND business_id = ?',
-      ).bind(purchaseId, businessId),
+        `DELETE FROM purchase_items
+         WHERE purchase_id = ? AND business_id = ?
+           AND EXISTS (
+             SELECT 1 FROM purchases
+             WHERE id = ? AND business_id = ? AND version = ? AND update_token = ?
+           )`,
+      ).bind(
+        purchaseId,
+        businessId,
+        purchaseId,
+        businessId,
+        input.version + 1,
+        updateToken,
+      ),
     ]
 
     for (let index = 0; index < input.items.length; index += 1) {
@@ -352,7 +380,10 @@ export class PurchaseRepository {
             `INSERT INTO items
              (business_id, category_id, name, default_unit, is_active, created_at, updated_at)
              SELECT ?, ?, ?, ?, 1, ?, ?
-             WHERE NOT EXISTS (
+             WHERE EXISTS (
+               SELECT 1 FROM purchases
+               WHERE id = ? AND business_id = ? AND version = ? AND update_token = ?
+             ) AND NOT EXISTS (
                SELECT 1 FROM items
                WHERE business_id = ? AND category_id = ? AND name = ? COLLATE NOCASE
              )`,
@@ -363,6 +394,10 @@ export class PurchaseRepository {
             purchaseItem.newItem.defaultUnit ?? null,
             now,
             now,
+            purchaseId,
+            businessId,
+            input.version + 1,
+            updateToken,
             businessId,
             row.categoryId,
             row.itemName,
@@ -373,8 +408,12 @@ export class PurchaseRepository {
             `INSERT INTO purchase_items
              (purchase_id, business_id, item_id, category_id,
               item_name_snapshot, category_name_snapshot, quantity, unit, amount_paise, created_at)
-             VALUES (?, ?, (SELECT id FROM items WHERE business_id = ? AND category_id = ? AND name = ? COLLATE NOCASE),
-             ?, ?, ?, ?, ?, ?, ?)`,
+             SELECT ?, ?, (SELECT id FROM items WHERE business_id = ? AND category_id = ? AND name = ? COLLATE NOCASE),
+                    ?, ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (
+               SELECT 1 FROM purchases
+               WHERE id = ? AND business_id = ? AND version = ? AND update_token = ?
+             )`,
           ).bind(
             purchaseId,
             businessId,
@@ -388,6 +427,10 @@ export class PurchaseRepository {
             purchaseItem.unit ?? null,
             purchaseItem.amountPaise,
             now,
+            purchaseId,
+            businessId,
+            input.version + 1,
+            updateToken,
           ),
         )
       } else if (purchaseItem.itemId !== undefined) {
@@ -396,7 +439,11 @@ export class PurchaseRepository {
             `INSERT INTO purchase_items
              (purchase_id, business_id, item_id, category_id,
               item_name_snapshot, category_name_snapshot, quantity, unit, amount_paise, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (
+               SELECT 1 FROM purchases
+               WHERE id = ? AND business_id = ? AND version = ? AND update_token = ?
+             )`,
           ).bind(
             purchaseId,
             businessId,
@@ -408,6 +455,10 @@ export class PurchaseRepository {
             purchaseItem.unit ?? null,
             purchaseItem.amountPaise,
             now,
+            purchaseId,
+            businessId,
+            input.version + 1,
+            updateToken,
           ),
         )
       }
@@ -417,19 +468,37 @@ export class PurchaseRepository {
     if (results.some((result) => !result.success)) {
       throw new Error('Purchase could not be updated')
     }
+    if (results[0].meta.changes < 1) {
+      throw new Error('Purchase was changed by another user; reload before saving')
+    }
   }
 
-  async deletePurchase(purchaseId: number, businessId: number) {
+  async deletePurchase(
+    purchaseId: number,
+    businessId: number,
+    version: number,
+    actorUserId: number,
+  ) {
     const existing = await this.getById(purchaseId, businessId)
     if (!existing) return false
     const results = await this.db.batch([
       this.db.prepare(
-        'DELETE FROM purchase_items WHERE purchase_id = ? AND business_id = ?',
-      ).bind(purchaseId, businessId),
+        `UPDATE purchases SET updated_by = ?, updated_by_user_id = ?, updated_at = ?
+         WHERE id = ? AND business_id = ? AND version = ?`,
+      ).bind(String(actorUserId), actorUserId, Date.now(), purchaseId, businessId, version),
       this.db.prepare(
-        'DELETE FROM purchases WHERE id = ? AND business_id = ?',
-      ).bind(purchaseId, businessId),
+        `DELETE FROM purchase_items
+         WHERE purchase_id = ? AND business_id = ?
+           AND EXISTS (SELECT 1 FROM purchases WHERE id = ? AND business_id = ? AND version = ?)`,
+      ).bind(purchaseId, businessId, purchaseId, businessId, version),
+      this.db.prepare(
+        'DELETE FROM purchases WHERE id = ? AND business_id = ? AND version = ?',
+      ).bind(purchaseId, businessId, version),
     ])
-    return results.every((result) => result.success)
+    if (results.some((result) => !result.success)) throw new Error('Purchase could not be deleted')
+    if (results[0].meta.changes < 1 || results[2].meta.changes < 1) {
+      throw new Error('Purchase was changed by another user; reload before deleting')
+    }
+    return true
   }
 }

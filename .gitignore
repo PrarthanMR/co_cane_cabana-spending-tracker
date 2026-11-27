@@ -16,6 +16,7 @@ dist-ssr
 *.tsbuildinfo
 .dev.vars
 .dev.vars.*
+/backups/
 
 # Editor directories and files
 .vscode/*
